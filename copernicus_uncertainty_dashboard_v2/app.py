@@ -79,17 +79,42 @@ def ensure_spatial_columns(df):
         df['longitude'] = 10.7522
 
     if 'country' not in df.columns:
-        def infer_country(row):
-            lat = row.get('latitude', 59.9139)
-            lon = row.get('longitude', 10.7522)
-            if 36 <= lat <= 47.5 and 6 <= lon <= 19:
-                return 'Italy'
-            if 55 <= lat <= 70 and 10 <= lon <= 25:
-                return 'Sweden'
-            if 57 <= lat <= 72 and 4 <= lon <= 32:
-                return 'Norway'
-            return 'Demo area'
-        df['country'] = df.apply(infer_country, axis=1)
+        def infer_region(row):
+            lat = row.get('latitude', np.nan)
+            lon = row.get('longitude', np.nan)
+
+            try:
+                lat = float(lat)
+                lon = float(lon)
+            except Exception:
+                return 'Unknown region'
+
+            if not np.isfinite(lat) or not np.isfinite(lon):
+                return 'Unknown region'
+
+            if lat >= 66.5:
+                band = 'Arctic'
+            elif lat >= 23.5:
+                band = 'Northern mid-latitudes'
+            elif lat > -23.5:
+                band = 'Tropics'
+            elif lat > -66.5:
+                band = 'Southern mid-latitudes'
+            else:
+                band = 'Antarctic'
+
+            if -30 <= lon <= 60:
+                sector = 'Europe-Africa sector'
+            elif 60 < lon <= 150:
+                sector = 'Asia-Pacific sector'
+            elif lon > 150 or lon <= -120:
+                sector = 'Pacific/Americas sector'
+            else:
+                sector = 'Americas-Atlantic sector'
+
+            return f'{band} / {sector}'
+
+        df['country'] = df.apply(infer_region, axis=1)
 
     if 'location_id' not in df.columns:
         df['location_id'] = (
@@ -204,10 +229,11 @@ config = {
 variable, label, unit, threshold, risk_column = config[use_case]
 
 # Location controls.
+st.sidebar.caption('The app is not restricted to Norway, Sweden or Italy; regions are inferred from the loaded grid extent.')
 country_options = ['All'] + sorted(df['country'].unique().tolist())
 selected_country = st.sidebar.selectbox(
-    'Country filter', country_options,
-    help='Filter the map and location list. The demo includes Norway, Sweden and Italy.'
+    'Region filter', country_options,
+    help='Filter the map and location list by broad spatial region inferred from latitude and longitude.'
 )
 country_df = df if selected_country == 'All' else df[df['country'] == selected_country]
 location_options = sorted(country_df['location_id'].unique())
@@ -215,7 +241,7 @@ selected_location = st.sidebar.selectbox(
     'Representative location for time-series',
     location_options,
     index=len(location_options) // 2,
-    help='The time-series charts below show one selected point. The map shows all selected-country points.'
+    help='The time-series charts below show one selected grid point. The map shows all points in the selected region.'
 )
 df_loc = df[df['location_id'] == selected_location].copy()
 

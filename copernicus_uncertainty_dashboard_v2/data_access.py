@@ -53,13 +53,43 @@ def _spatial_id(df, precision=2):
 
 
 def _infer_country(lat, lon):
-    if 36 <= lat <= 47.5 and 6 <= lon <= 19:
-        return 'Italy'
-    if 55 <= lat <= 70 and 10 <= lon <= 25:
-        return 'Sweden'
-    if 57 <= lat <= 72 and 4 <= lon <= 32:
-        return 'Norway'
-    return 'Copernicus area'
+    """
+    Assign a broad global region from latitude/longitude.
+
+    This avoids hard-coding the dashboard to Norway, Sweden and Italy.
+    The label is intentionally broad so the app works for any Copernicus
+    spatial subset without requiring a country-boundary dataset.
+    """
+    try:
+        lat = float(lat)
+        lon = float(lon)
+    except Exception:
+        return 'Unknown region'
+
+    if not np.isfinite(lat) or not np.isfinite(lon):
+        return 'Unknown region'
+
+    if lat >= 66.5:
+        band = 'Arctic'
+    elif lat >= 23.5:
+        band = 'Northern mid-latitudes'
+    elif lat > -23.5:
+        band = 'Tropics'
+    elif lat > -66.5:
+        band = 'Southern mid-latitudes'
+    else:
+        band = 'Antarctic'
+
+    if -30 <= lon <= 60:
+        sector = 'Europe-Africa sector'
+    elif 60 < lon <= 150:
+        sector = 'Asia-Pacific sector'
+    elif lon > 150 or lon <= -120:
+        sector = 'Pacific/Americas sector'
+    else:
+        sector = 'Americas-Atlantic sector'
+
+    return f'{band} / {sector}'
 
 
 def _open_cams_grib(path):
