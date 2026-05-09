@@ -87,6 +87,97 @@ def heritage_humidity_risk(rh):
     return 'Extreme'
 
 
+def dry_stress_score(rh):
+    """
+    Cultural heritage dry-stress score from relative humidity.
+
+    0 = no dry stress
+    100 = severe dry stress
+
+    RH >= 40% gives 0.
+    RH <= 20% approaches 100.
+    """
+    return np.where(
+        np.asarray(rh) >= 40,
+        0,
+        np.minimum((40 - np.asarray(rh)) / 20 * 100, 100)
+    )
+
+
+def dry_stress_risk_category(score):
+    if score <= 0:
+        return 'Low'
+    if score < 40:
+        return 'Moderate'
+    if score < 70:
+        return 'High'
+    return 'Extreme'
+
+
+def dust_deposition_proxy(pm10, pm25, dust_aod=None):
+    """
+    Cultural heritage dust-deposition proxy.
+
+    If dust AOD is available, convert it to a proxy deposition scale.
+    Otherwise use coarse particulate matter: max(PM10 - PM2.5, 0).
+
+    This is a screening indicator for surface soiling and particle deposition.
+    """
+    if dust_aod is not None:
+        return np.maximum(np.asarray(dust_aod), 0) * 100
+    return np.maximum(np.asarray(pm10) - np.asarray(pm25), 0)
+
+
+def dust_deposition_risk_category(value):
+    if value < 10:
+        return 'Low'
+    if value < 25:
+        return 'Moderate'
+    if value < 50:
+        return 'High'
+    return 'Extreme'
+
+
+def heritage_compound_score(row):
+    """
+    Combined cultural heritage material-stress score.
+
+    Components:
+    - Humidity/moisture stress
+    - Dry stress
+    - Dust deposition
+    - Reactive pollutants: NO2, SO2 and O3
+    """
+    rh = row['relative_humidity']
+
+    if rh < 40:
+        humidity_component = (40 - rh) / 40 * 100
+    elif rh <= 60:
+        humidity_component = 0
+    else:
+        humidity_component = min((rh - 60) / 30 * 100, 100)
+
+    dry_component = float(dry_stress_score(rh))
+    dust_component = min(row.get('dust_deposition', 0) / 25 * 100, 100)
+
+    pollutant_component = (
+        0.40 * row.get('no2', 0) / 40 +
+        0.30 * row.get('so2', 0) / 20 +
+        0.30 * row.get('o3', 0) / 100
+    ) * 100
+
+    return (
+        0.35 * humidity_component +
+        0.25 * dry_component +
+        0.25 * dust_component +
+        0.15 * pollutant_component
+    )
+
+
+def heritage_compound_risk_category(value):
+    return risk_category(value, [35, 60, 85])
+
+
 def color_for_risk(risk):
     colors = {
         'Low': '#2ecc71',

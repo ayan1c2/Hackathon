@@ -7,7 +7,7 @@ from indicators import (
     approximate_heat_index, air_health_burden_score, compound_heat_pollution_score,
     heat_risk_category, pm25_risk_category, pm10_risk_category, no2_risk_category,
     o3_risk_category, health_burden_risk_category, compound_risk_category,
-    heritage_humidity_risk, color_for_risk, color_for_confidence
+    heritage_humidity_risk, dry_stress_score, dry_stress_risk_category, dust_deposition_proxy, dust_deposition_risk_category, heritage_compound_score, heritage_compound_risk_category, color_for_risk, color_for_confidence
 )
 from uncertainty import ensemble_summary, confidence_from_spread, probability_of_exceedance, monte_carlo_indicator
 from visualization import fan_chart, traffic_light_card, interval_prediction_chart, uncertainty_map
@@ -26,7 +26,9 @@ INDICATOR_HELP = {
     'Health: multi-pollutant burden': 'A simple combined score from several pollutants. Higher means several air-quality pressures are occurring together.',
     'Health: compound heat + pollution risk': 'Combines heat stress and air pollution. Useful because hot stagnant weather can amplify pollution-related health stress.',
     'Cultural heritage: humidity risk': 'Shows whether humidity is too dry, stable, or too humid for heritage materials such as wood, paper, stone and paintings.',
-    'Cultural heritage: dust deposition': 'Shows potential dust/particle deposition risk, relevant for surface soiling, cleaning needs and outdoor monument exposure.'
+    'Cultural heritage: dry stress': 'Quantifies low-humidity stress that can cause shrinkage, cracking and deformation in wood, paper, textiles and paintings.',
+    'Cultural heritage: dust deposition': 'Shows potential dust/particle deposition risk, relevant for surface soiling, cleaning needs and outdoor monument exposure.',
+    'Cultural heritage: combined material stress': 'Combines humidity, dry stress, dust and reactive pollutants into one preventive-conservation screening score.'
 }
 
 PLAIN_LABELS = {
@@ -168,6 +170,19 @@ df['health_burden_risk'] = df['health_burden_score'].apply(health_burden_risk_ca
 df['compound_health_risk'] = df['compound_health_score'].apply(compound_risk_category)
 df['heritage_risk'] = df['relative_humidity'].apply(heritage_humidity_risk)
 
+# Cultural heritage indicators.
+# Humidity risk: direct RH threshold classification.
+# Dry stress: low-RH score from 0 to 100.
+# Dust deposition: use existing dust_deposition if present; otherwise estimate from PM10 - PM2.5.
+if 'dust_deposition' not in df.columns:
+    df['dust_deposition'] = dust_deposition_proxy(df['pm10'], df['pm25'])
+
+df['dry_stress_score'] = dry_stress_score(df['relative_humidity'])
+df['dry_stress_risk'] = df['dry_stress_score'].apply(dry_stress_risk_category)
+df['dust_deposition_risk'] = df['dust_deposition'].apply(dust_deposition_risk_category)
+df['heritage_compound_score'] = df.apply(heritage_compound_score, axis=1)
+df['heritage_compound_risk'] = df['heritage_compound_score'].apply(heritage_compound_risk_category)
+
 risk_code_map = {'Low': 0, 'Moderate': 1, 'High': 2, 'Extreme': 3, 'Dry stress': 1}
 df['risk_code'] = df['compound_health_risk'].map(risk_code_map)
 
@@ -180,7 +195,9 @@ config = {
     'Health: multi-pollutant burden': ('health_burden_score', 'Multi-pollutant health burden', 'index', 110, 'health_burden_risk'),
     'Health: compound heat + pollution risk': ('compound_health_score', 'Compound heat + pollution risk', 'index', 100, 'compound_health_risk'),
     'Cultural heritage: humidity risk': ('relative_humidity', 'Relative humidity', '%', 75, 'heritage_risk'),
-    'Cultural heritage: dust deposition': ('dust_deposition', 'Dust deposition proxy', 'mg/m2/day', 12, 'heritage_risk')
+    'Cultural heritage: dry stress': ('dry_stress_score', 'Dry stress score', 'index', 40, 'dry_stress_risk'),
+    'Cultural heritage: dust deposition': ('dust_deposition', 'Dust deposition proxy', 'mg/m2/day', 12, 'dust_deposition_risk'),
+    'Cultural heritage: combined material stress': ('heritage_compound_score', 'Combined heritage material stress', 'index', 60, 'heritage_compound_risk')
 }
 variable, label, unit, threshold, risk_column = config[use_case]
 
@@ -324,8 +341,12 @@ with tab_map:
             map_summary['risk_label'] = map_summary['mean'].apply(compound_risk_category)
         elif variable == 'relative_humidity':
             map_summary['risk_label'] = map_summary['mean'].apply(heritage_humidity_risk)
+        elif variable == 'dry_stress_score':
+            map_summary['risk_label'] = map_summary['mean'].apply(dry_stress_risk_category)
         elif variable == 'dust_deposition':
-            map_summary['risk_label'] = map_summary['mean'].apply(lambda x: 'High' if x >= threshold else 'Moderate' if x >= threshold * 0.6 else 'Low')
+            map_summary['risk_label'] = map_summary['mean'].apply(dust_deposition_risk_category)
+        elif variable == 'heritage_compound_score':
+            map_summary['risk_label'] = map_summary['mean'].apply(heritage_compound_risk_category)
 
         map_summary['plain_language'] = map_summary.apply(
             lambda r: f"{r['risk_label']} risk; {r['confidence'].lower()} confidence; {r['prob_exceedance']:.0%} chance above threshold.",
@@ -398,6 +419,36 @@ with tab_health_heritage:
     - **Dust and particles** can soil surfaces and increase cleaning needs.
     - **NO2, SO2 and ozone** can contribute to corrosion and material degradation.
     ''')
+
+    st.markdown('#### Cultural heritage indicator calculations')
+    h1, h2, h3, h4 = st.columns(4)
+    with h1:
+        rh_mean = latest_members['relative_humidity'].mean()
+        st.metric('Humidity risk input', f"{rh_mean:.1f} %", help='Relative humidity is classified into dry stress, low, moderate, high or extreme moisture risk.')
+        st.caption(f"Risk: **{heritage_humidity_risk(rh_mean)}**")
+    with h2:
+        dry_mean = latest_members['dry_stress_score'].mean()
+        st.metric('Dry stress score', f"{dry_mean:.1f}", help='0 means no dry stress; 100 means severe low-humidity stress.')
+        st.caption(f"Risk: **{dry_stress_risk_category(dry_mean)}**")
+    with h3:
+        dust_mean = latest_members['dust_deposition'].mean()
+        st.metric('Dust deposition proxy', f"{dust_mean:.1f}", help='Estimated from dust deposition if available, otherwise from coarse particles PM10 - PM2.5.')
+        st.caption(f"Risk: **{dust_deposition_risk_category(dust_mean)}**")
+    with h4:
+        heritage_mean = latest_members['heritage_compound_score'].mean()
+        st.metric('Combined material stress', f"{heritage_mean:.1f}", help='Combines humidity, dry stress, dust and reactive pollutants.')
+        st.caption(f"Risk: **{heritage_compound_risk_category(heritage_mean)}**")
+
+    with st.expander('How cultural heritage indicators are calculated'):
+        st.markdown('''
+        **Humidity risk:** relative humidity thresholds identify dry stress, stable conditions, mould risk and high-moisture stress.
+
+        **Dry stress:** low relative humidity is converted to a 0-100 score: RH >= 40% gives 0; RH <= 20% approaches 100.
+
+        **Dust deposition risk:** uses a dust deposition variable when available; otherwise a coarse-particle proxy is calculated as `PM10 - PM2.5`.
+
+        **Combined material stress:** combines humidity/moisture stress, dry stress, dust deposition and reactive pollutants (`NO2`, `SO2`, `O3`) into one preventive-conservation screening score.
+        ''')
 
     st.subheader('Monte Carlo uncertainty propagation')
     if variable == 'heat_index':
