@@ -362,6 +362,8 @@ The compound heat + pollution score captures the combined impact of thermal stre
 
 ### Methodology
 
+We compute a multi-pollutant health burden score by normalizing pollutant concentrations against WHO guidelinevalues and weighting them based on epidemiological importance.
+
 **Step 1: Heat normalization (0–100)**  
 Heat stress is scaled between 27°C (no stress) and 41°C (extreme stress).
 
