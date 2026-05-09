@@ -350,3 +350,51 @@ This dashboard helps users understand:
 - How sure we are: confidence
 - Where it matters: map
 - Why it matters: explanation
+
+
+---
+
+## Compound Heat + Pollution Score (Health & Heritage Interpretation)
+
+### Overview
+
+The compound heat + pollution score captures the combined impact of thermal stress and air pollution on human health and cultural heritage.
+
+### Methodology
+
+**Step 1: Heat normalization (0–100)**  
+Heat stress is scaled between 27°C (no stress) and 41°C (extreme stress).
+
+**Step 2: Pollution burden (0–100+)**  
+Multiple pollutants (PM2.5, PM10, NO2, O3, SO2, CO) are combined relative to health thresholds.
+
+**Step 3: Interaction term**  
+Captures amplification when heat and pollution are both high.
+
+**Step 4: Final score**  
+Weighted combination of heat, pollution, and interaction.
+
+### Risk Classification
+
+- Low (<65)  
+- Moderate (65–100)  
+- High (100–160)  
+- Extreme (>160)
+
+### Health Interpretation
+
+- Low: safe conditions  
+- Moderate: sensitive groups affected  
+- High: increased health stress  
+- Extreme: severe compound risk  
+
+### Cultural Heritage Interpretation
+
+- Low: stable conditions  
+- Moderate: minor stress  
+- High: degradation risk  
+- Extreme: accelerated damage  
+
+### Key Takeaway
+
+The compound score transforms multiple environmental stressors into a unified, interaction-aware index enabling decision-ready insights.
