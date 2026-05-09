@@ -370,6 +370,7 @@ heat_component = max((heat_index - 27) / (41 - 27), 0) * 100
 **Step 2: Pollution burden (0–100+)**  
 Multiple pollutants (PM2.5, PM10, NO2, O3, SO2, CO) are combined relative to health thresholds.
 
+Weighted sum of normalized pollutant concentrations -
 health_burden_score = (
     0.30 * pm25 / 25 +
     0.20 * pm10 / 50 +
