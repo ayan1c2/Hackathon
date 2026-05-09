@@ -1,0 +1,13 @@
+streamlit
+pandas
+numpy
+xarray
+netCDF4
+cdsapi
+scikit-learn
+tensorflow
+plotly
+matplotlib
+scipy
+cfgrib
+eccodes
