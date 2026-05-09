@@ -365,14 +365,33 @@ The compound heat + pollution score captures the combined impact of thermal stre
 **Step 1: Heat normalization (0–100)**  
 Heat stress is scaled between 27°C (no stress) and 41°C (extreme stress).
 
+heat_component = max((heat_index - 27) / (41 - 27), 0) * 100
+
 **Step 2: Pollution burden (0–100+)**  
 Multiple pollutants (PM2.5, PM10, NO2, O3, SO2, CO) are combined relative to health thresholds.
+
+health_burden_score = (
+    0.30 * pm25 / 25 +
+    0.20 * pm10 / 50 +
+    0.18 * no2 / 40 +
+    0.17 * o3 / 100 +
+    0.08 * so2 / 20 +
+    0.07 * co / 4
+) * 100
 
 **Step 3: Interaction term**  
 Captures amplification when heat and pollution are both high.
 
+interaction = 0.20 * heat_component * pollution_component / 100
+
 **Step 4: Final score**  
 Weighted combination of heat, pollution, and interaction.
+
+compound_score = (
+    0.45 * heat_component +
+    0.45 * pollution_component +
+    interaction
+)
 
 ### Risk Classification
 
