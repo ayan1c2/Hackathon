@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-from data_access import create_demo_dataset
+from data_access import load_copernicus_dataset
 from indicators import (
     approximate_heat_index, air_health_burden_score, compound_heat_pollution_score,
     heat_risk_category, pm25_risk_category, pm10_risk_category, no2_risk_category,
@@ -15,7 +15,7 @@ from ml_models import train_random_forest_regressor, train_interval_models
 
 st.set_page_config(page_title='Uncertainty-aware Copernicus Indicators', layout='wide')
 st.title('Uncertainty-aware Copernicus Indicators Dashboard')
-st.caption('Interactive ECMWF hackathon prototype for C3S/CAMS-style health and cultural heritage indicators.')
+st.caption('Interactive ECMWF hackathon prototype using real C3S/CAMS files from the local data folder.')
 
 INDICATOR_HELP = {
     'Health: heat stress': 'Shows how hot it feels to the human body when temperature and humidity combine. Useful for heat-health warnings.',
@@ -79,17 +79,42 @@ def ensure_spatial_columns(df):
         df['longitude'] = 10.7522
 
     if 'country' not in df.columns:
-        def infer_country(row):
-            lat = row.get('latitude', 59.9139)
-            lon = row.get('longitude', 10.7522)
-            if 36 <= lat <= 47.5 and 6 <= lon <= 19:
-                return 'Italy'
-            if 55 <= lat <= 70 and 10 <= lon <= 25:
-                return 'Sweden'
-            if 57 <= lat <= 72 and 4 <= lon <= 32:
-                return 'Norway'
-            return 'Demo area'
-        df['country'] = df.apply(infer_country, axis=1)
+        def infer_region(row):
+            lat = row.get('latitude', np.nan)
+            lon = row.get('longitude', np.nan)
+
+            try:
+                lat = float(lat)
+                lon = float(lon)
+            except Exception:
+                return 'Unknown region'
+
+            if not np.isfinite(lat) or not np.isfinite(lon):
+                return 'Unknown region'
+
+            if lat >= 66.5:
+                band = 'Arctic'
+            elif lat >= 23.5:
+                band = 'Northern mid-latitudes'
+            elif lat > -23.5:
+                band = 'Tropics'
+            elif lat > -66.5:
+                band = 'Southern mid-latitudes'
+            else:
+                band = 'Antarctic'
+
+            if -30 <= lon <= 60:
+                sector = 'Europe-Africa sector'
+            elif 60 < lon <= 150:
+                sector = 'Asia-Pacific sector'
+            elif lon > 150 or lon <= -120:
+                sector = 'Pacific/Americas sector'
+            else:
+                sector = 'Americas-Atlantic sector'
+
+            return f'{band} / {sector}'
+
+        df['country'] = df.apply(infer_region, axis=1)
 
     if 'location_id' not in df.columns:
         df['location_id'] = (
@@ -112,14 +137,7 @@ with st.sidebar:
     )
     st.info(INDICATOR_HELP[use_case])
 
-    n_days = st.slider(
-        'Forecast days', 7, 60, 30,
-        help='Number of days shown in the synthetic forecast. More days gives a longer time series.'
-    )
-    n_members = st.slider(
-        'Ensemble members', 5, 50, 20,
-        help='Number of possible forecast versions. More members make uncertainty estimates more stable.'
-    )
+    st.success('Data source: real C3S/CAMS files from ./data only')
     show_map = st.checkbox(
         'Show geospatial uncertainty map', value=True,
         help='Shows where risk is high and where uncertainty is large. Marker size means uncertainty.'
@@ -150,8 +168,14 @@ if show_details:
         - **Map marker color** means risk intensity; **map marker size** means uncertainty.
         ''')
 
-# Synthetic C3S/CAMS-style fallback dataset.
-df = create_demo_dataset(n_days=n_days, n_members=n_members)
+# Real Copernicus dataset only. No synthetic fallback is used.
+try:
+    df = load_copernicus_dataset()
+except Exception as exc:
+    st.error('Could not load real C3S/CAMS data from ./data.')
+    st.exception(exc)
+    st.stop()
+
 df = ensure_spatial_columns(df)
 
 # Useful debug line in the sidebar so users can verify the active schema.
@@ -170,12 +194,15 @@ df['health_burden_risk'] = df['health_burden_score'].apply(health_burden_risk_ca
 df['compound_health_risk'] = df['compound_health_score'].apply(compound_risk_category)
 df['heritage_risk'] = df['relative_humidity'].apply(heritage_humidity_risk)
 
-# Cultural heritage indicators.
+# Cultural heritage indicators for real C3S/CAMS data.
 # Humidity risk: direct RH threshold classification.
 # Dry stress: low-RH score from 0 to 100.
-# Dust deposition: use existing dust_deposition if present; otherwise estimate from PM10 - PM2.5.
-if 'dust_deposition' not in df.columns:
-    df['dust_deposition'] = dust_deposition_proxy(df['pm10'], df['pm25'])
+# Dust deposition: use CAMS dust variable if available; otherwise estimate from PM10 - PM2.5.
+if 'dust_deposition' not in df.columns or df['dust_deposition'].isna().all():
+    if 'aod' in df.columns:
+        df['dust_deposition'] = dust_deposition_proxy(df['pm10'], df['pm25'], dust_aod=df['aod'])
+    else:
+        df['dust_deposition'] = dust_deposition_proxy(df['pm10'], df['pm25'])
 
 df['dry_stress_score'] = dry_stress_score(df['relative_humidity'])
 df['dry_stress_risk'] = df['dry_stress_score'].apply(dry_stress_risk_category)
@@ -202,10 +229,11 @@ config = {
 variable, label, unit, threshold, risk_column = config[use_case]
 
 # Location controls.
+st.sidebar.caption('The app is not restricted to Norway, Sweden or Italy; regions are inferred from the loaded grid extent.')
 country_options = ['All'] + sorted(df['country'].unique().tolist())
 selected_country = st.sidebar.selectbox(
-    'Country filter', country_options,
-    help='Filter the map and location list. The demo includes Norway, Sweden and Italy.'
+    'Region filter', country_options,
+    help='Filter the map and location list by broad spatial region inferred from latitude and longitude.'
 )
 country_df = df if selected_country == 'All' else df[df['country'] == selected_country]
 location_options = sorted(country_df['location_id'].unique())
@@ -213,7 +241,7 @@ selected_location = st.sidebar.selectbox(
     'Representative location for time-series',
     location_options,
     index=len(location_options) // 2,
-    help='The time-series charts below show one selected point. The map shows all selected-country points.'
+    help='The time-series charts below show one selected grid point. The map shows all points in the selected region.'
 )
 df_loc = df[df['location_id'] == selected_location].copy()
 
@@ -432,7 +460,7 @@ with tab_health_heritage:
         st.caption(f"Risk: **{dry_stress_risk_category(dry_mean)}**")
     with h3:
         dust_mean = latest_members['dust_deposition'].mean()
-        st.metric('Dust deposition proxy', f"{dust_mean:.1f}", help='Estimated from dust deposition if available, otherwise from coarse particles PM10 - PM2.5.')
+        st.metric('Dust deposition proxy', f"{dust_mean:.1f}", help='Uses CAMS dust variable if available; otherwise estimates coarse particles as PM10 - PM2.5.')
         st.caption(f"Risk: **{dust_deposition_risk_category(dust_mean)}**")
     with h4:
         heritage_mean = latest_members['heritage_compound_score'].mean()
@@ -445,7 +473,7 @@ with tab_health_heritage:
 
         **Dry stress:** low relative humidity is converted to a 0-100 score: RH >= 40% gives 0; RH <= 20% approaches 100.
 
-        **Dust deposition risk:** uses a dust deposition variable when available; otherwise a coarse-particle proxy is calculated as `PM10 - PM2.5`.
+        **Dust deposition risk:** uses a CAMS dust variable where available; otherwise a coarse-particle proxy is calculated as `PM10 - PM2.5`.
 
         **Combined material stress:** combines humidity/moisture stress, dry stress, dust deposition and reactive pollutants (`NO2`, `SO2`, `O3`) into one preventive-conservation screening score.
         ''')

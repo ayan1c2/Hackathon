@@ -1,320 +1,133 @@
-from pathlib import Path
-import numpy as np
 import pandas as pd
-import xarray as xr
-import zipfile
+import numpy as np
 
 
-DATA_DIR = Path('data')
-
-
-def _find_file(patterns):
-    for pattern in patterns:
-        matches = sorted(DATA_DIR.glob(pattern))
-        if matches:
-            return matches[0]
-    raise FileNotFoundError(
-        'Could not find required Copernicus data file in ./data. Tried: ' + ', '.join(patterns)
-    )
-
-
-def _first_existing_coord(df, names):
-    for name in names:
-        if name in df.columns:
-            return name
-    return None
-
-
-def _normalize_time(df):
-    time_col = _first_existing_coord(df, ['valid_time', 'time', 'forecast_reference_time'])
-    if time_col is None:
-        raise ValueError('No time coordinate found. Expected valid_time or time.')
-    df['datetime'] = pd.to_datetime(df[time_col])
-    df['date'] = df['datetime'].dt.normalize()
-    return df
-
-
-def _spatial_id(df, precision=2):
-    lat_col = _first_existing_coord(df, ['latitude', 'lat'])
-    lon_col = _first_existing_coord(df, ['longitude', 'lon'])
-    if lat_col is None or lon_col is None:
-        # Point-like dataset with no explicit grid.
-        df['latitude'] = 59.9139
-        df['longitude'] = 10.7522
-    else:
-        df = df.rename(columns={lat_col: 'latitude', lon_col: 'longitude'})
-    df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
-    df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
-    df['location_id'] = (
-        'lat' + df['latitude'].round(precision).astype(str) +
-        '_lon' + df['longitude'].round(precision).astype(str)
-    )
-    return df
-
-
-def _infer_country(lat, lon):
+def download_utci_from_cds(year='2023', month='07', day='15', area=None, output_file='utci_era5_heat.nc'):
     """
-    Assign a broad global region from latitude/longitude.
+    Minimal C3S ERA5-HEAT UTCI downloader.
 
-    This avoids hard-coding the dashboard to Norway, Sweden and Italy.
-    The label is intentionally broad so the app works for any Copernicus
-    spatial subset without requiring a country-boundary dataset.
+    Area format: [North, West, South, East]
+    Example default covers large parts of Europe.
     """
-    try:
-        lat = float(lat)
-        lon = float(lon)
-    except Exception:
-        return 'Unknown region'
+    if area is None:
+        area = [72, -10, 35, 30]
 
-    if not np.isfinite(lat) or not np.isfinite(lon):
-        return 'Unknown region'
-
-    if lat >= 66.5:
-        band = 'Arctic'
-    elif lat >= 23.5:
-        band = 'Northern mid-latitudes'
-    elif lat > -23.5:
-        band = 'Tropics'
-    elif lat > -66.5:
-        band = 'Southern mid-latitudes'
-    else:
-        band = 'Antarctic'
-
-    if -30 <= lon <= 60:
-        sector = 'Europe-Africa sector'
-    elif 60 < lon <= 150:
-        sector = 'Asia-Pacific sector'
-    elif lon > 150 or lon <= -120:
-        sector = 'Pacific/Americas sector'
-    else:
-        sector = 'Americas-Atlantic sector'
-
-    return f'{band} / {sector}'
-
-
-def _open_cams_grib(path):
-    """Open a CAMS GRIB file robustly. Some GRIB files need filtering by typeOfLevel."""
-    attempts = [
-        {},
-        {'filter_by_keys': {'typeOfLevel': 'surface'}},
-        {'filter_by_keys': {'typeOfLevel': 'heightAboveGround'}},
-        {'filter_by_keys': {'typeOfLevel': 'atmosphere'}},
-        {'filter_by_keys': {'typeOfLevel': 'entireAtmosphere'}},
-    ]
-    last_error = None
-    for backend_kwargs in attempts:
-        try:
-            return xr.open_dataset(path, engine='cfgrib', backend_kwargs=backend_kwargs)
-        except Exception as exc:
-            last_error = exc
-    raise RuntimeError(f'Could not open CAMS GRIB file {path}: {last_error}')
-
-
-def _convert_pollutant_units(series, clean_name):
-    """Heuristic conversion from CAMS SI units to dashboard-friendly units."""
-    s = pd.to_numeric(series, errors='coerce')
-    max_abs = float(np.nanmax(np.abs(s))) if len(s.dropna()) else np.nan
-
-    # Many CAMS near-surface mass concentrations are kg m-3.
-    # If values are tiny, convert to ug m-3.
-    if clean_name in ['pm25', 'pm10', 'no2', 'o3', 'so2'] and np.isfinite(max_abs) and max_abs < 1e-3:
-        return s * 1e9
-
-    # CO can appear as kg m-3; convert tiny values to mg m-3 for dashboard use.
-    if clean_name == 'co' and np.isfinite(max_abs) and max_abs < 1e-3:
-        return s * 1e6
-
-    return s
-
-
-def _describe_file(path):
-    path = Path(path)
-    try:
-        head = path.read_bytes()[:16]
-    except Exception:
-        head = b''
-    return f'{path} size={path.stat().st_size if path.exists() else 0} bytes first_bytes={head!r}'
-
-
-def _open_dataset_robust(path, preferred=None):
-    """Open NetCDF/GRIB robustly and raise a useful error if the file is not readable."""
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(path)
-
-    if zipfile.is_zipfile(path):
-        raise ValueError(
-            f'{path} is a ZIP archive, not a directly readable NetCDF/GRIB file. '
-            'Extract it first and place the .nc or .grib file inside ./data.'
-        )
-
-    errors = []
-    engines = []
-    if preferred:
-        engines.append(preferred)
-    suffix = path.suffix.lower()
-    if suffix in ['.grib', '.grb', '.grib2']:
-        engines.extend(['cfgrib'])
-    engines.extend(['netcdf4', 'h5netcdf', 'scipy', 'cfgrib'])
-
-    seen = set()
-    engines = [e for e in engines if not (e in seen or seen.add(e))]
-
-    for engine in engines:
-        try:
-            if engine == 'cfgrib':
-                return _open_cams_grib(path)
-            return xr.open_dataset(path, engine=engine)
-        except Exception as exc:
-            errors.append(f'{engine}: {type(exc).__name__}: {exc}')
-
-    raise ValueError(
-        'Could not open Copernicus file with any supported engine.\n'
-        f'File diagnostics: {_describe_file(path)}\n'
-        'Tried engines: ' + ', '.join(engines) + '\n'
-        'Errors:\n- ' + '\n- '.join(errors) + '\n\n'
-        'Fixes: install h5netcdf/netcdf4/cfgrib/eccodes, or check that the file is a real .nc/.grib and not an HTML error page or ZIP.'
+    import cdsapi
+    client = cdsapi.Client()
+    client.retrieve(
+        'derived-utci-historical',
+        {
+            'variable': 'universal_thermal_climate_index',
+            'version': '1_1',
+            'product_type': 'consolidated_dataset',
+            'year': year,
+            'month': month,
+            'day': day,
+            'time': ['00:00', '06:00', '12:00', '18:00'],
+            'area': area,
+            'format': 'netcdf'
+        },
+        output_file
     )
+    return output_file
 
 
-def load_c3s_utci(path=None):
-    """Load C3S ERA5-HEAT UTCI from ./data and return daily real observations/analysis rows."""
-    if path is None:
-        path = _find_file(['*c3s*utci*.nc', '*era5*heat*utci*.nc', '*utci*.nc', '*utci*.grib', '*utci*.grb'])
-    ds = _open_dataset_robust(path)
-
-    candidates = [v for v in ds.data_vars if 'utci' in v.lower() or 'thermal' in v.lower()]
-    var = candidates[0] if candidates else list(ds.data_vars)[0]
-
-    df = ds[var].to_dataframe(name='utci_c').reset_index()
-    df = _normalize_time(df)
-    df = _spatial_id(df)
-
-    # ERA5-HEAT UTCI is often stored in Kelvin; convert if it looks Kelvin-like.
-    if df['utci_c'].median(skipna=True) > 150:
-        df['utci_c'] = df['utci_c'] - 273.15
-
-    # Use UTCI as real heat indicator. Provide compatible fields for app formulas.
-    df['temperature_c'] = df['utci_c']
-    if 'relative_humidity' not in df.columns:
-        # Real UTCI file does not contain RH. Use NaN-safe neutral placeholder for dashboard sections
-        # that require RH; this is not synthetic forecast data, only a compatibility variable.
-        df['relative_humidity'] = 50.0
-
-    out = df[['date', 'datetime', 'location_id', 'latitude', 'longitude', 'utci_c', 'temperature_c', 'relative_humidity']].copy()
-    return out
-
-
-def load_cams_pollution(path=None):
-    """Load CAMS global pollution forecast from ./data and return daily rows by grid cell and forecast step/time."""
-    if path is None:
-        path = _find_file(['*cams*pollution*.grib', '*cams*pollution*.grb', '*cams*.grib', '*cams*.grb'])
-    ds = _open_cams_grib(path)
-
-    variable_aliases = {
-        'pm25': ['pm2p5', 'pm2p5_conc', 'particulate_matter_2.5um', 'pm2p5fire'],
-        'pm10': ['pm10', 'pm10_conc', 'particulate_matter_10um'],
-        'no2': ['no2', 'nitrogen_dioxide'],
-        'o3': ['go3', 'o3', 'ozone'],
-        'so2': ['so2', 'sulphur_dioxide', 'sulfur_dioxide'],
-        'co': ['co', 'carbon_monoxide'],
-        'aod': ['aod550', 'aod', 'aerosol_optical_depth_550nm'],
-        'dust_deposition': ['duaod550', 'dust_aerosol_optical_depth_550nm', 'aermr04'],
+def _country_grids(points_per_side):
+    """Create small demo grids for Norway, Sweden and Italy."""
+    country_boxes = {
+        # name: (north, west, south, east, temperature_offset, pollution_offset)
+        'Norway': (61.4, 8.2, 58.6, 12.4, -1.5, 0.85),
+        'Sweden': (60.8, 12.0, 57.0, 18.5, -0.8, 0.95),
+        'Italy': (45.8, 8.0, 41.0, 14.5, 3.0, 1.25),
     }
-
-    frames = []
-    available = set(ds.data_vars)
-    for clean_name, aliases in variable_aliases.items():
-        raw = next((a for a in aliases if a in available), None)
-        if raw is None:
-            continue
-        temp = ds[raw].to_dataframe(name=clean_name).reset_index()
-        temp = _normalize_time(temp)
-        temp = _spatial_id(temp)
-        temp[clean_name] = _convert_pollutant_units(temp[clean_name], clean_name)
-        frames.append(temp[['date', 'datetime', 'location_id', 'latitude', 'longitude', clean_name]])
-
-    if not frames:
-        raise ValueError(
-            'No expected CAMS variables found. Available GRIB variables: ' + ', '.join(sorted(available))
-        )
-
-    df = frames[0]
-    keys = ['date', 'datetime', 'location_id', 'latitude', 'longitude']
-    for frame in frames[1:]:
-        df = df.merge(frame, on=keys, how='outer')
-
-    return df.sort_values(keys)
+    locations = []
+    for country, (north, west, south, east, temp_offset, pollution_offset) in country_boxes.items():
+        lat_values = np.linspace(south, north, points_per_side)
+        lon_values = np.linspace(west, east, points_per_side)
+        idx = 1
+        for lat in lat_values:
+            for lon in lon_values:
+                locations.append({
+                    'country': country,
+                    'location_id': f'{country}_{idx:02d}',
+                    'latitude': float(lat),
+                    'longitude': float(lon),
+                    'temperature_offset': temp_offset,
+                    'pollution_offset': pollution_offset,
+                })
+                idx += 1
+    return locations
 
 
-def load_copernicus_dataset():
+def create_demo_dataset(n_days=372, n_members=20, seed=42, n_locations=9):
     """
-    Load real C3S/CAMS files from ./data only. No synthetic fallback is used.
+    Synthetic C3S/CAMS-like ensemble dataset with country, latitude and longitude.
 
-    Uncertainty in the dashboard is computed from real forecast lead times / hourly values
-    available for the same day and grid point. The column 'member' is therefore a real
-    sample index, not generated data.
+    The demo covers Norway, Sweden and Italy so the dashboard can support:
+    - country filtering
+    - geospatial uncertainty maps
+    - health indicators
+    - cultural heritage indicators
+
+    Each row represents one ensemble member, one date and one location.
     """
-    utci = load_c3s_utci()
-    cams = load_cams_pollution()
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range('2025-05-01', periods=n_days, freq='D')
+    seasonal = np.linspace(0, np.pi, n_days)
+    pollution_wave = np.linspace(0, 4 * np.pi, n_days)
+    rows = []
 
-    keys = ['date', 'location_id', 'latitude', 'longitude']
+    points_per_side = max(2, int(np.sqrt(n_locations)))
+    locations = _country_grids(points_per_side)
 
-    # Daily UTCI aggregation from real hourly C3S data.
-    utci_daily = utci.groupby(keys, as_index=False).agg(
-        utci_c=('utci_c', 'mean'),
-        temperature_c=('temperature_c', 'mean'),
-        relative_humidity=('relative_humidity', 'mean')
-    )
+    for loc in locations:
+        country = loc['country']
+        loc_id = loc['location_id']
+        lat = loc['latitude']
+        lon = loc['longitude']
+        temp_offset = loc['temperature_offset']
+        pollution_offset = loc['pollution_offset']
 
-    # Keep CAMS forecast lead-time/time rows; add UTCI daily context to each row.
-    df = cams.merge(utci_daily, on=keys, how='left')
+        urban_factor = rng.uniform(0.7, 1.3) * pollution_offset
+        coastal_cooling = (lon - np.mean([x['longitude'] for x in locations if x['country'] == country])) * 0.12
+        elevation_or_exposure = rng.normal(0, 0.5)
 
-    # If grids do not align exactly, attach the area-mean C3S UTCI by date.
-    if df['temperature_c'].isna().all():
-        area_utci = utci.groupby('date', as_index=False).agg(
-            utci_c=('utci_c', 'mean'),
-            temperature_c=('temperature_c', 'mean'),
-            relative_humidity=('relative_humidity', 'mean')
-        )
-        df = df.drop(columns=['utci_c', 'temperature_c', 'relative_humidity'], errors='ignore')
-        df = df.merge(area_utci, on='date', how='left')
+        for member in range(n_members):
+            member_bias = rng.normal(0, 0.8)
+            temp = (
+                30 + temp_offset + 6 * np.sin(seasonal) + member_bias
+                - coastal_cooling + elevation_or_exposure + rng.normal(0, 1.7, n_days)
+            )
+            rh = 56 + 16 * np.sin(np.linspace(0, 2.8 * np.pi, n_days)) + rng.normal(0, 6.5, n_days)
+            wind = np.clip(rng.normal(2.8, 0.9, n_days), 0.2, 12)
+            pm25 = urban_factor * (17 + 8 * np.sin(pollution_wave)) + rng.normal(0, 3.5, n_days)
+            pm10 = pm25 * rng.normal(1.7, 0.12, n_days) + rng.normal(4, 3, n_days)
+            no2 = urban_factor * (24 + 9 * np.sin(pollution_wave + 0.7)) - 1.3 * wind + rng.normal(0, 4, n_days)
+            o3 = 82 + temp_offset * 2 + 14 * np.sin(seasonal) - 0.25 * no2 + rng.normal(0, 8, n_days)
+            so2 = 4 * pollution_offset + 1.2 * np.sin(pollution_wave + 1.4) + rng.normal(0, 0.9, n_days)
+            co = 0.35 * pollution_offset + 0.08 * np.sin(pollution_wave + 0.3) + rng.normal(0, 0.04, n_days)
+            aod = 0.12 + 0.006 * np.clip(pm25, 0, None) + rng.normal(0, 0.025, n_days)
+            dust_deposition = np.clip(6 + 0.25 * np.clip(pm10 - pm25, 0, None) + rng.normal(0, 2.0, n_days), 0, None)
 
-    # Dashboard compatibility fields.
-    for col, default in {
-        'pm25': np.nan,
-        'pm10': np.nan,
-        'no2': np.nan,
-        'o3': np.nan,
-        'so2': np.nan,
-        'co': np.nan,
-        'aod': np.nan,
-        'dust_deposition': np.nan,
-        'wind_speed': 2.0,
-        'relative_humidity': 50.0,
-    }.items():
-        if col not in df.columns:
-            df[col] = default
+            for i, date in enumerate(dates):
+                rows.append({
+                    'date': date,
+                    'member': member,
+                    'country': country,
+                    'location_id': loc_id,
+                    'latitude': lat,
+                    'longitude': lon,
+                    'temperature_c': temp[i],
+                    'relative_humidity': np.clip(rh[i], 20, 100),
+                    'wind_speed': wind[i],
+                    'pm25': np.clip(pm25[i], 1, 150),
+                    'pm10': np.clip(pm10[i], 2, 250),
+                    'no2': np.clip(no2[i], 1, 200),
+                    'o3': np.clip(o3[i], 1, 250),
+                    'so2': np.clip(so2[i], 0.1, 80),
+                    'co': np.clip(co[i], 0.05, 10),
+                    'aod': np.clip(aod[i], 0.01, 2),
+                    'dust_deposition': dust_deposition[i]
+                })
 
-    # Fill missing pollutants with column medians where available so compound indicators can run.
-    pollutant_cols = ['pm25', 'pm10', 'no2', 'o3', 'so2', 'co', 'aod', 'dust_deposition']
-    for col in pollutant_cols:
-        if df[col].notna().any():
-            df[col] = df[col].fillna(df[col].median())
-        else:
-            df[col] = 0.0
-
-    df['country'] = df.apply(lambda r: _infer_country(r['latitude'], r['longitude']), axis=1)
-
-    # Real sample index from forecast valid times within the day/grid cell.
-    df['member'] = df.groupby(['date', 'location_id']).cumcount()
-
-    df = df.sort_values(['date', 'location_id', 'member']).reset_index(drop=True)
-    return df
-
-
-# Backward-compatible name for old imports. This intentionally does NOT create synthetic data.
-def create_demo_dataset(*args, **kwargs):
-    raise RuntimeError(
-        'Synthetic data has been disabled. Use load_copernicus_dataset() and put C3S/CAMS files under ./data.'
-    )
+    return pd.DataFrame(rows)

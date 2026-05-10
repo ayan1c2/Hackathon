@@ -11,3 +11,5 @@ matplotlib
 scipy
 cfgrib
 eccodes
+
+h5netcdf

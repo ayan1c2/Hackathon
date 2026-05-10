@@ -93,9 +93,6 @@ def dry_stress_score(rh):
 
     0 = no dry stress
     100 = severe dry stress
-
-    RH >= 40% gives 0.
-    RH <= 20% approaches 100.
     """
     return np.where(
         np.asarray(rh) >= 40,
@@ -120,8 +117,6 @@ def dust_deposition_proxy(pm10, pm25, dust_aod=None):
 
     If dust AOD is available, convert it to a proxy deposition scale.
     Otherwise use coarse particulate matter: max(PM10 - PM2.5, 0).
-
-    This is a screening indicator for surface soiling and particle deposition.
     """
     if dust_aod is not None:
         return np.maximum(np.asarray(dust_aod), 0) * 100
@@ -142,11 +137,8 @@ def heritage_compound_score(row):
     """
     Combined cultural heritage material-stress score.
 
-    Components:
-    - Humidity/moisture stress
-    - Dry stress
-    - Dust deposition
-    - Reactive pollutants: NO2, SO2 and O3
+    Combines humidity/moisture stress, dry stress, dust deposition,
+    and reactive pollutants NO2, SO2 and O3.
     """
     rh = row['relative_humidity']
 
